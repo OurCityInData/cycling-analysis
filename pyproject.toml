@@ -1,0 +1,8 @@
+[project]
+name = "cycling-analysis"
+version = "0.1.0"
+description = "OSM cycling-infrastructure comparison pipeline (Amsterdam, Barcelona, Freiburg, country-level screening)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

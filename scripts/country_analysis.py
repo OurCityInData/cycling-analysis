@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""
+Country/region-level cycling infrastructure screening, municipality by
+municipality (via GADM boundaries).
+
+Replaces cycling_country_analysis.ipynb, where COUNTRY / FILTER_REGIONS were
+two module-level variables you edited by hand between runs. Resumable: safe
+to Ctrl-C and re-run, it picks up from `{run-name}_checkpoint.csv`.
+
+Usage:
+    python scripts/country_analysis.py --country spain --regions Cataluña
+    python scripts/country_analysis.py --country netherlands   # whole country
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from cycling_analysis.country import REGIONS, run_country_analysis
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--country', required=True, choices=sorted(REGIONS.keys()))
+    parser.add_argument('--regions', nargs='*', default=None,
+                         help='Sub-region name(s) to run (must match GADM values - '
+                              'run once and check the printed diagnostic if unsure). '
+                              'Omit to run the whole country.')
+    parser.add_argument('--data-dir', default='data')
+    parser.add_argument('--max-segments', type=int, default=30_000,
+                         help='Skip a municipality if its road network exceeds this many '
+                              'segments (guards against RAM blowups from bbox overcounts)')
+    args = parser.parse_args()
+
+    summary = run_country_analysis(
+        country=args.country,
+        filter_regions=args.regions,
+        data_dir=Path(args.data_dir),
+        max_segments=args.max_segments,
+    )
+
+    print(f'\nShape: {summary.shape[0]} municipalities x {summary.shape[1]} columns')
+
+    n = 10
+    print(f'\nTop {n} municipalities by total cycling infrastructure:\n')
+    top = summary.nlargest(n, 'Total Cycling Path km')[['Region', 'Municipality', 'Total Cycling Path km']]
+    print(top.to_string(index=False))
+
+    label_cols = [c for c in summary.columns if c not in ('Region', 'Municipality', 'Total Cycling Path km')]
+    nat = summary[label_cols].sum().sort_values(ascending=False)
+    total_nat = nat.sum()
+    print('\nCategory breakdown:')
+    for cat, km in nat.items():
+        pct = km / total_nat * 100 if total_nat > 0 else 0
+        bar = '#' * int(pct / 2)
+        print(f'  {cat:<35} {km:>8.1f} km  {pct:5.1f}%  {bar}')
+
+
+if __name__ == '__main__':
+    main()

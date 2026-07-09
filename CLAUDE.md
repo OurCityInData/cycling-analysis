@@ -38,6 +38,12 @@ python scripts/compare_vs_bikeneat.py --city barcelona
 python scripts/country_analysis.py --country spain --regions Cataluña
 ```
 
+## Git workflow
+
+- Repo lives at `github.com/OurCityInData/cycling-analysis` (org-owned, not a personal account). `main` is branch-protected: no direct pushes, PRs required.
+- Work on a branch (`fix/...`, `feat/...`, `chore/...`), commit locally in small coherent chunks with clean messages that explain *why* not *what*, then push and open a PR when the change is ready — pushing after every single local commit isn't necessary, push/PR when it's coherent enough to review or you want it backed up remotely.
+- Update this file (`CLAUDE.md`) whenever architecture, taxonomies, gotchas, or known gaps change — in the same commit/PR as the code change, not after. This file is the source of truth for future sessions; let it drift and it actively misleads.
+
 ## Architecture
 
 ### Classification layer (most important)

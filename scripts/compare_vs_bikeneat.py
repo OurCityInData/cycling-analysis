@@ -19,6 +19,8 @@ import warnings
 
 import geopandas as gpd
 import osmnx as ox
+import matplotlib
+matplotlib.use('Agg')
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 warnings.filterwarnings('ignore')

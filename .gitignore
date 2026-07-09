@@ -1,9 +1,12 @@
 # Data + generated outputs (large, re-downloadable / re-generatable)
 data/
 output/
+cache/
+.old_runs_backup/
 *.osm.pbf
 *.geojson
 *_checkpoint.csv
+*_cycling_by_municipality.csv
 
 # Python
 __pycache__/

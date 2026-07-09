@@ -1,20 +1,23 @@
 """
-Ground-truth accuracy test for the Barcelona classifier, converted from
-classifier_accuracy_test.ipynb.
+Ground-truth tests for classify_area_road(), the single area-adjustable
+classifier that replaced classify_road() in cycling_analysis/country.py.
 
-Each TEST_CASES entry is a real OSM way that was checked in person, with
-tags copied straight from the iD editor, and the category confirmed on the
-ground. This replaces manually re-running the notebook to eyeball a results
-table: now `pytest tests/test_classification.py -v` fails loudly (and
-tells you exactly which way regressed) if a future change to
-has_cycling_infrastructure_bcn / classify_cycling_path_bcn breaks a
-previously-correct case.
+Uses the SAME real, in-person-verified OSM ways as tests/test_classification.py
+(tags and urls copied verbatim from there), so the new area-adjustable engine
+can be checked against the exact same ground truth as the old Barcelona
+classifier. Two label renames apply going from the old Barcelona-taxonomy
+names to the new fixed CATEGORIES vocabulary: "Calmed zone at 10 km/h" ->
+"Pacified zone at 10 km/h" and "Greenway (parks)" -> "Greenway".
 
-IMPORTANT: this test file is *why* we know classify_cycling_path_bcn in
-barcelona_vs_official.ipynb had drifted from the version actually being
-validated here — see MIGRATION_NOTES.md. cycling_analysis/classification.py
-now ships the version with the maxspeed-based fallback that these test
-cases actually require (case "Calmed zone at 10 km/h" (#1)/(#2) below).
+country/municipality are assigned per way based on its actual real-world
+location (not all of these are in Barcelona - one is Dutch, one is in Girona
+province, one is in Italy), since classify_area_road's output depends on
+which CyclingLegalConfig applies.
+
+Uses "area_case" rather than "case" as the parametrize name so
+tests/conftest.py's Barcelona-specific reporting hook (hardcoded to
+has_cycling_infrastructure_bcn / classify_cycling_path_bcn, keyed off a
+param literally named "case") does not pick these up.
 """
 
 import os
@@ -25,18 +28,22 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from cycling_analysis.classification import (
-    classify_cycling_path_bcn,
-    has_cycling_infrastructure_bcn,
+from cycling_analysis.area_classification import (
+    CyclingLegalConfig,
+    classify_area_road,
+    get_cycling_config,
 )
 
-# Tags copied directly from the iD editor for each location checked in person.
-# Add more cases by appending in the same format.
+SUPPORTED_COUNTRIES = {'spain', 'netherlands', 'germany', 'belgium', 'denmark'}
+
+# Tags/urls copied verbatim from tests/test_classification.py's TEST_CASES -
+# these are real OSM ways checked in person, not synthetic.
 TEST_CASES = [
     dict(
         category="Two-way side bike lane",
         name="Avinguda Paral·lel (Ejemplo 1)",
         url="https://www.openstreetmap.org/#map=16/41.37500/2.15871&layers=Y",
+        country="spain", municipality="Barcelona",
         tags={
             "cycle_network": "ES:BCN", "highway": "cycleway", "lanes": "2",
             "lit": "yes", "name": "Avinguda Paral·lel", "oneway": "no",
@@ -48,6 +55,7 @@ TEST_CASES = [
         category="Two-way side bike lane",
         name="Passeig de Sant Joan (Ejemplo 2)",
         url="https://www.openstreetmap.org/edit#map=18/41.393305/2.177892",
+        country="spain", municipality="Barcelona",
         tags={
             "cycle_network": "ES:BCN", "cycleway:surface": "asphalt",
             "highway": "cycleway", "lanes": "2", "layer": "1", "lit": "yes",
@@ -59,6 +67,7 @@ TEST_CASES = [
         category="One-way side bike lane",
         name="Carrer de Manso",
         url="https://www.openstreetmap.org/#map=20/41.3774395/2.1615654&layers=Y",
+        country="spain", municipality="Barcelona",
         tags={
             "cycleway:surface": "asphalt", "highway": "cycleway", "lit": "yes",
             "name": "Carrer de Manso", "oneway": "yes", "segregated": "yes",
@@ -69,6 +78,7 @@ TEST_CASES = [
         category="One-way side bike lane",
         name="Carrer d'Aragó",
         url="https://www.openstreetmap.org/#map=20/41.3825122/2.1526109&layers=Y",
+        country="spain", municipality="Barcelona",
         tags={
             "cycleway:surface": "asphalt", "highway": "cycleway", "lanes": "1",
             "lit": "yes", "name": "Carrer d'Aragó", "oneway": "yes",
@@ -79,6 +89,7 @@ TEST_CASES = [
         category="Bus-bike lane",
         name="Carrer de la Creu Coberta",
         url="https://www.openstreetmap.org/edit#map=19/41.375534/2.141368",
+        country="spain", municipality="Barcelona",
         tags={
             "bicycle": "yes", "cycleway:both": "share_busway", "foot": "yes",
             "highway": "tertiary", "lanes": "4", "lanes:backward": "2",
@@ -91,15 +102,18 @@ TEST_CASES = [
         category="Bike lane on sidewalk",
         name="Avinguda del Litoral",
         url="https://www.openstreetmap.org/edit#map=19/41.390423/2.201212",
+        country="spain", municipality="Barcelona",
         tags={
             "bicycle": "yes", "highway": "footway", "lit": "yes",
             "surface": "compacted", "wheelchair": "yes",
         },
     ),
     dict(
-        category="Calmed zone at 10 km/h",
+        # was "Calmed zone at 10 km/h" under the old Barcelona taxonomy
+        category="Pacified zone at 10 km/h",
         name="Carrer del Comte Borrell (#1)",
         url="https://www.openstreetmap.org/edit#map=19/41.377226/2.163290",
+        country="spain", municipality="Barcelona",
         tags={
             "bicycle": "yes", "cycleway:both": "no", "highway": "living_street",
             "lanes": "1", "maxspeed": "10", "name": "Carrer del Comte Borrell",
@@ -109,9 +123,10 @@ TEST_CASES = [
         },
     ),
     dict(
-        category="Calmed zone at 10 km/h",
+        category="Pacified zone at 10 km/h",
         name="Carrer del Comte Borrell (#2)",
         url="https://www.openstreetmap.org/#map=20/41.3768840/2.1632110&layers=Y",
+        country="spain", municipality="Barcelona",
         tags={
             "bicycle": "yes", "cycleway:both": "no", "highway": "living_street",
             "lanes": "1", "maxspeed": "10", "name": "Carrer del Comte Borrell",
@@ -121,9 +136,10 @@ TEST_CASES = [
         },
     ),
     dict(
-        category="Greenway (parks)",
+        category="Greenway",  # was "Greenway (parks)"
         name="Rijwielpad Noordvoort",
         url="",
+        country="netherlands", municipality=None,
         tags={
             "highway": "cycleway", "lit": "no", "mofa": "no", "moped": "no",
             "name": "Rijwielpad Noordvoort", "surface": "asphalt",
@@ -131,9 +147,11 @@ TEST_CASES = [
         },
     ),
     dict(
-        category="Greenway (parks)",
+        category="Greenway",
         name="Carrilet Girona - Sant Feliu de Guíxols",
         url="https://www.openstreetmap.org/edit#map=18/41.951875/2.836758",
+        # Girona province, not Barcelona city - no region override applies.
+        country="spain", municipality=None,
         tags={
             "highway": "cycleway",
             "maxspeed": "30",
@@ -142,9 +160,13 @@ TEST_CASES = [
         },
     ),
     dict(
-        category="Greenway (parks)",
+        category="Greenway",
         name="Shared greenway near Rimini",
         url="https://www.openstreetmap.org/#map=19/44.062943/12.580397&layers=Y",
+        # Italy isn't one of the 5 countries this repo has config for - no
+        # documented rule exists, so this falls back to a bare default
+        # config with no special legal rule (see get_config_for_case below).
+        country="italy", municipality=None,
         tags={
             "bicycle": "designated", "foot": "designated", "highway": "cycleway",
             "lanes": "2", "lit": "yes", "motorcar": "no", "motorcycle": "no",
@@ -155,69 +177,70 @@ TEST_CASES = [
 ]
 
 
-def _predict(tags: dict):
-    row = pd.Series(tags)
-    passes = has_cycling_infrastructure_bcn(row)
-    if not passes:
-        return passes, "NOT INCLUDED (filtered out)"
-    return passes, classify_cycling_path_bcn(row)
+def get_config_for_case(case) -> CyclingLegalConfig:
+    if case["country"] not in SUPPORTED_COUNTRIES:
+        return CyclingLegalConfig()
+    return get_cycling_config(case["country"], case.get("municipality"))
 
 
-# Known failures — marked xfail so they are visible in `pytest -rx` rather
+def _predict(case):
+    row = pd.Series(case["tags"])
+    return classify_area_road(row, get_config_for_case(case))
+
+
+# Known failures - marked xfail so they are visible in `pytest -rx` rather
 # than silently passing or breaking the suite. Each maps a case name to the
-# reason the classifier currently gets it wrong.
+# reason classify_area_road currently gets it wrong.
 KNOWN_FAILING_CASES = {
-    # classify_cycling_path_bcn does not distinguish rural/off-road cycleways from
-    # urban ones — all highway=cycleway cases without a foot tag fall through to
-    # "Two-way side bike lane" instead of "Greenway (parks)".
     "Rijwielpad Noordvoort": (
-        "classify_cycling_path_bcn returns 'Two-way side bike lane' for "
-        "highway=cycleway with no foot tag; rural mandatory cycle paths "
-        "(NL:G13) are not yet distinguished from urban cycleways."
-    ),
-    "Carrilet Girona - Sant Feliu de Guíxols": (
-        "classify_cycling_path_bcn returns 'Two-way side bike lane' for "
-        "highway=cycleway with no foot tag; converted-railway greenways "
-        "(railway=abandoned) are not yet distinguished from urban cycleways."
+        "classify_area_road's tag-only Greenway heuristic has no signal to "
+        "key off here: no railway=abandoned, no unpaved surface/tracktype, "
+        "and the NL:G13 mandatory-cycle-path traffic sign isn't read by the "
+        "(currently empty) sign_code_rules extension point. Falls through to "
+        "'Two-way side bike lane' via the plain highway=cycleway rule instead."
     ),
     "Shared greenway near Rimini": (
-        "classify_cycling_path_bcn returns 'Bike lane on sidewalk' for "
-        "highway=cycleway + foot=designated + segregated=no; off-road shared "
-        "paths are not yet distinguished from sidewalk-adjacent cycleways."
+        "Paved (surface=asphalt), segregated=no shared path with no "
+        "railway/tracktype/unpaved-surface signal - the tag-only Greenway "
+        "heuristic can't distinguish this from an ordinary urban cycleway, "
+        "so it falls through to 'Two-way side bike lane'."
     ),
 }
+# Note: "Carrilet Girona - Sant Feliu de Guíxols" was ALSO a known failure
+# under the old classify_cycling_path_bcn (see test_classification.py's
+# KNOWN_FAILING_CASES), but classify_area_road's tag-only heuristic checks
+# railway=abandoned directly and gets this one right - a genuine improvement
+# over the old classifier for this specific case, despite the two remaining
+# gaps above.
 
 
 def _case_param(case):
     marks = []
     if case["name"] in KNOWN_FAILING_CASES:
-        marks.append(pytest.mark.xfail(
-            reason=KNOWN_FAILING_CASES[case["name"]],
-            strict=True,
-        ))
+        marks.append(pytest.mark.xfail(reason=KNOWN_FAILING_CASES[case["name"]], strict=True))
     return pytest.param(case, id=case["name"], marks=marks)
 
 
-@pytest.mark.parametrize("case", [_case_param(c) for c in TEST_CASES])
-def test_ground_truth_classification(case):
-    passes, predicted = _predict(case["tags"])
-    assert predicted == case["category"], (
-        f"{case['name']} ({case['url']}): expected {case['category']!r}, "
-        f"got {predicted!r} (passed filter: {passes})"
+@pytest.mark.parametrize("area_case", [_case_param(c) for c in TEST_CASES])
+def test_ground_truth_classification(area_case):
+    predicted = _predict(area_case)
+    assert predicted == area_case["category"], (
+        f"{area_case['name']} ({area_case['url']}): "
+        f"expected {area_case['category']!r}, got {predicted!r}"
     )
 
 
 def test_overall_accuracy_matches_known_baseline():
     """
-    Mirrors the notebook's summary cell: computes accuracy across all cases
-    and reports every mismatch at once. Asserts against the CURRENT known
-    baseline (6/8 - see KNOWN_FAILING_CASES) rather than 100%, so this test
-    catches new regressions without being permanently red over the two
-    pre-existing, unresolved cases.
+    Mirrors test_classification.py's summary test: computes accuracy across
+    all real, ground-truthed cases and reports every mismatch at once.
+    Asserts against the CURRENT known baseline (9/11 - see
+    KNOWN_FAILING_CASES) rather than 100%, so this test catches regressions
+    without being permanently red over the two pre-existing, unresolved cases.
     """
     results = []
     for tc in TEST_CASES:
-        passes, predicted = _predict(tc["tags"])
+        predicted = _predict(tc)
         results.append({
             "name": tc["name"],
             "expected": tc["category"],

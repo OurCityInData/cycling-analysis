@@ -16,9 +16,13 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+from cycling_analysis.area_classification import CATEGORIES
+from cycling_analysis.bike_amenities import AMENITY_METRIC_COLUMNS
 from cycling_analysis.country import REGIONS, run_country_analysis
 
 
@@ -49,14 +53,23 @@ def main():
     top = summary.nlargest(n, 'Total Cycling Path km')[['Region', 'Municipality', 'Total Cycling Path km']]
     print(top.to_string(index=False))
 
-    label_cols = [c for c in summary.columns if c not in ('Region', 'Municipality', 'Total Cycling Path km')]
-    nat = summary[label_cols].sum().sort_values(ascending=False)
+    cat_cols = [c for c in CATEGORIES if c in summary.columns]
+    nat = summary[cat_cols].sum().sort_values(ascending=False)
     total_nat = nat.sum()
     print('\nCategory breakdown:')
     for cat, km in nat.items():
         pct = km / total_nat * 100 if total_nat > 0 else 0
         bar = '#' * int(pct / 2)
         print(f'  {cat:<35} {km:>8.1f} km  {pct:5.1f}%  {bar}')
+
+    if 'Municipality area (km²)' in summary.columns:
+        print(f"\nTotal area covered: {summary['Municipality area (km²)'].sum():,.1f} km²")
+
+    amenity_cols = [c for c in AMENITY_METRIC_COLUMNS if c in summary.columns]
+    if amenity_cols:
+        print('\nBike amenities (nationwide totals):')
+        for col in amenity_cols:
+            print(f'  {col:<40} {summary[col].sum():>10,.0f}')
 
 
 if __name__ == '__main__':

@@ -17,6 +17,8 @@ Usage:
 import argparse
 import os
 import sys
+import matplotlib
+matplotlib.use('Agg')
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -101,11 +103,14 @@ def main():
     plot_bar_comparison_two(a_osm_km, b_osm_km, a_off_km, b_off_km, args.output_dir)
 
     print("\n  Saving output files...")
+    scenario_a_dir = os.path.join(args.output_dir, 'scenario_A')
+    scenario_b_dir = os.path.join(args.output_dir, 'scenario_B')
+    os.makedirs(scenario_a_dir, exist_ok=True)
+    os.makedirs(scenario_b_dir, exist_ok=True)
     save_csv(a_joined, a_coverage, a_osm_km, a_off_km,
-             os.path.join(args.output_dir, 'scenario_A'), official_gdf=a_off_gdf)
+             scenario_a_dir, official_gdf=a_off_gdf)
     save_csv(b_joined, b_coverage, b_osm_km, b_off_km,
-             os.path.join(args.output_dir, 'scenario_B'), official_gdf=b_off_gdf)
-
+             scenario_b_dir, official_gdf=b_off_gdf)
     import pandas as pd
     rows = []
     for cat in CAT_ORDER:

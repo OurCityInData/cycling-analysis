@@ -1,13 +1,15 @@
 """
 Country-level cycling-infrastructure screening.
 
-Ported from cycling_country_analysis.ipynb. This is a THIRD, independent
-classify_road() taxonomy — not the same as classify_cycling_path_amsterdam
-or classify_cycling_path_bcn in classification.py. It exists for a
-different purpose: coarse, nationwide screening across every municipality
-in a country/region (via GADM boundaries), not a single-city high-precision
-comparison against an official reference dataset. Kept as its own module
-rather than forced into classification.py.
+Ported from cycling_country_analysis.ipynb. Classification itself lives in
+area_classification.py (classify_area_road(), a single area-adjustable
+taxonomy driven by CyclingLegalConfig) — not the same as
+classify_cycling_path_amsterdam or classify_cycling_path_bcn in
+classification.py. This module exists for a different purpose: coarse,
+nationwide screening across every municipality in a country/region (via
+GADM boundaries), not a single-city high-precision comparison against an
+official reference dataset. Kept as its own module rather than forced into
+classification.py.
 
 The original notebook processed one region/country per run via two
 module-level variables you edited by hand (COUNTRY, FILTER_REGIONS) and
@@ -29,7 +31,22 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import requests
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 from pyrosm import OSM
+
+from .area_classification import (
+    CATEGORIES,
+    EXTRA_OSM_ATTRIBUTES,
+    classify_area_road,
+    get_cycling_config,
+)
+from .bike_amenities import (
+    AMENITY_METRIC_COLUMNS,
+    BIKE_AMENITY_EXTRA_ATTRIBUTES,
+    BIKE_AMENITY_FILTER,
+    compute_bike_amenity_stats,
+)
 
 # ── Sub-region PBF sources ───────────────────────────────────────────────────
 # Each entry: (sub_region_name, geofabrik_url). sub_region_name must match the
@@ -135,53 +152,6 @@ UTM_CRS_BY_COUNTRY = {
     'belgium': 'EPSG:32631', 'germany': 'EPSG:32632', 'denmark': 'EPSG:32632',
 }
 
-CATEGORIES = [
-    'greenway_parks', 'two_way_side_lane', 'one_way_side_lane',
-    'bike_lane_on_sidewalk', 'bus_bike_lane', 'contraflow',
-    'fietsstraat_2_1', 'calmed_zone_10', 'calmed_street_20',
-    'shared_street_30', 'service_road', 'car_road',
-]
-
-CATEGORY_LABELS = {
-    'greenway_parks':        'Greenway (parks)',
-    'two_way_side_lane':     'Two-way side bike lane',
-    'one_way_side_lane':     'One-way side bike lane',
-    'bike_lane_on_sidewalk': 'Bike lane on sidewalk',
-    'bus_bike_lane':         'Bus-bike lane',
-    'contraflow':            'Contraflow cycling',
-    'fietsstraat_2_1':       '2-1 road',
-    'calmed_zone_10':        'Calmed zone at 10 km/h',
-    'calmed_street_20':      'Calmed street at 20 km/h',
-    'shared_street_30':      'Shared street at 30 km/h',
-    'service_road':          'Service road',
-    'car_road':              'Car road',
-}
-
-GREEN_LANDUSE = {'park', 'forest', 'nature_reserve', 'recreation_ground',
-                  'meadow', 'grass', 'village_green'}
-GREEN_LEISURE = {'park', 'garden', 'nature_reserve', 'recreation_ground'}
-GREEN_NATURAL = {'wood', 'scrub', 'heath', 'grassland'}
-
-CYCLING_TAGS = [
-    'cycleway', 'cycleway:left', 'cycleway:right', 'cycleway:both',
-    'bicycle', 'foot', 'segregated', 'busway',
-    'cyclestreet', 'bicycle_road', 'access', 'oneway:bicycle',
-]
-
-EXCLUDED_HW = {
-    'motorway', 'motorway_link',
-    'proposed', 'construction', 'raceway',
-    'abandoned', 'razed', 'disused',
-}
-
-CAR_ROADS_HW = {
-    'trunk', 'trunk_link',
-    'primary', 'primary_link',
-    'secondary', 'secondary_link',
-    'tertiary', 'tertiary_link',
-    'residential', 'unclassified', 'road',
-}
-
 MAX_SEGMENTS = 30_000
 
 
@@ -250,115 +220,65 @@ def osmium_extract(src_pbf: str, bbox, dest_pbf: str) -> bool:
     return result.returncode == 0
 
 
-def get_green_polygons(osm_obj, crs) -> gpd.GeoDataFrame:
-    try:
-        lu = osm_obj.get_landuse()
-        mask = (
-            lu['landuse'].isin(GREEN_LANDUSE)
-            | lu['leisure'].isin(GREEN_LEISURE)
-            | lu['natural'].isin(GREEN_NATURAL)
-        )
-        polys = lu[mask][['geometry']].copy()
-        polys = polys[polys.geometry.is_valid]
-        polys = polys[polys.geometry.geom_type.isin(['Polygon', 'MultiPolygon'])]
-        if len(polys) == 0:
-            return gpd.GeoDataFrame(geometry=[], crs=crs)
-        return polys.to_crs(crs).dissolve()[['geometry']].reset_index(drop=True)
-    except Exception:
-        return gpd.GeoDataFrame(geometry=[], crs=crs)
+def save_table_png(df: pd.DataFrame, out_path: Path, title: str = None) -> None:
+    """
+    Render a DataFrame as a table image. Uses the Agg canvas directly
+    (rather than pyplot) so this doesn't touch global matplotlib backend
+    state - safe to call from a library module regardless of what backend
+    the calling script has configured.
+    """
+    n_rows, n_cols = df.shape
+    col_labels = list(df.columns)
+    cell_text = [
+        [f'{v:,.1f}' if isinstance(v, (int, float, np.floating)) else str(v) for v in row]
+        for row in df.itertuples(index=False)
+    ]
 
+    # Column headers (e.g. "Pacified street at 20 km/h") are usually far
+    # longer than the numbers underneath them - size each column off the
+    # longest string it actually has to hold (header or value), not
+    # matplotlib's default per-cell auto-width, which sizes off cell
+    # content only and causes long headers to overlap neighboring columns.
+    col_char_widths = [
+        max(len(label), max((len(row[i]) for row in cell_text), default=0))
+        for i, label in enumerate(col_labels)
+    ]
+    total_chars = sum(col_char_widths)
+    col_fracs = [w / total_chars for w in col_char_widths]
 
-def tag_greenway(roads_utm: gpd.GeoDataFrame, green_dissolved: gpd.GeoDataFrame) -> pd.Series:
-    if len(green_dissolved) == 0:
-        return pd.Series(False, index=roads_utm.index)
-    centroids = roads_utm[['geometry']].copy()
-    centroids['geometry'] = roads_utm.geometry.centroid
-    sj = gpd.sjoin(centroids.reset_index(), green_dissolved, how='left', predicate='within')
-    in_green = set(sj.loc[sj['index_right'].notna(), 'index'].tolist())
-    return roads_utm.index.isin(in_green)
+    fig_width = max(10, total_chars * 0.12)
+    fig_height = max(2, 0.32 * (n_rows + 1) + (0.6 if title else 0))
 
+    fig = Figure(figsize=(fig_width, fig_height))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    ax.axis('off')
+    if title:
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=14)
 
-def _v(row, field: str) -> str:
-    v = row.get(field, None)
-    return '' if (v is None or str(v) in ('nan', 'None', '')) else str(v).lower().strip()
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=col_labels,
+        colWidths=col_fracs,
+        cellLoc='right',
+        loc='center',
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.4)
 
+    text_col_count = sum(1 for dtype in df.dtypes if dtype == object)
+    for (r, c), cell in table.get_celld().items():
+        cell.set_edgecolor('#dddddd')
+        if r == 0:
+            cell.set_facecolor('#2b6cb0')
+            cell.set_text_props(color='white', fontweight='bold')
+        else:
+            cell.set_facecolor('#f2f2f2' if r % 2 == 0 else 'white')
+        if c < text_col_count:
+            cell.set_text_props(ha='left')
 
-def parse_maxspeed(v: str):
-    if not v:
-        return None
-    if v in ('walk', 'foot', 'signing'):
-        return 5
-    if ':' in v:
-        v = v.split(':')[-1]
-    try:
-        return int(float(v.split()[0]))
-    except (ValueError, IndexError):
-        return None
-
-
-def classify_road(row):
-    """Coarse nationwide classifier - distinct taxonomy from classification.py."""
-    hw = _v(row, 'highway')
-    bicycle = _v(row, 'bicycle')
-    access = _v(row, 'access')
-    busway = _v(row, 'busway')
-    cw = _v(row, 'cycleway')
-    cw_left = _v(row, 'cycleway:left')
-    cw_right = _v(row, 'cycleway:right')
-    cw_both = _v(row, 'cycleway:both')
-    cyclestreet = _v(row, 'cyclestreet')
-    bicy_road = _v(row, 'bicycle_road')
-    maxspeed = parse_maxspeed(_v(row, 'maxspeed'))
-    oneway = _v(row, 'oneway')
-    ow_bicycle = _v(row, 'oneway:bicycle')
-    in_green = bool(row.get('in_green_space', False))
-
-    if hw in EXCLUDED_HW:
-        return None
-    if bicycle in ('no', 'dismount') and hw not in ('cycleway',):
-        return None
-    if access == 'no' and bicycle not in ('yes', 'designated', 'permissive'):
-        return None
-
-    if in_green and hw in ('cycleway', 'path', 'footway', 'track') and bicycle != 'no':
-        return 'greenway_parks'
-    if cw_both in ('track', 'lane', 'yes'):
-        return 'two_way_side_lane'
-    if cw_left in ('track', 'lane') and cw_right in ('track', 'lane'):
-        return 'two_way_side_lane'
-    if hw == 'cycleway' and oneway not in ('yes', '1', '-1', 'true'):
-        return 'two_way_side_lane'
-    if cw in ('track', 'lane', 'shared_lane'):
-        return 'one_way_side_lane'
-    if cw_right in ('track', 'lane', 'yes') or cw_left in ('track', 'lane', 'yes'):
-        return 'one_way_side_lane'
-    if hw == 'cycleway' and oneway in ('yes', '1', 'true'):
-        return 'one_way_side_lane'
-    if hw in ('footway', 'path', 'pedestrian') and bicycle in ('yes', 'designated', 'permissive'):
-        return 'bike_lane_on_sidewalk'
-    if busway in ('lane', 'yes') and bicycle not in ('no',):
-        return 'bus_bike_lane'
-    if cw in ('opposite_lane', 'opposite_track', 'opposite'):
-        return 'contraflow'
-    if oneway in ('yes', '1', 'true') and ow_bicycle in ('no', '-1'):
-        return 'contraflow'
-    if cyclestreet in ('yes', '1', 'true') or bicy_road in ('yes', '1', 'true'):
-        return 'fietsstraat_2_1'
-    if hw == 'living_street':
-        return 'calmed_zone_10'
-    if maxspeed is not None and maxspeed <= 10:
-        return 'calmed_zone_10'
-    if maxspeed == 20:
-        return 'calmed_street_20'
-    if maxspeed == 30:
-        return 'shared_street_30'
-    if hw == 'service' and bicycle not in ('no',) and access not in ('no',):
-        return 'service_road'
-    if hw in CAR_ROADS_HW and bicycle not in ('no',):
-        return 'car_road'
-    if hw in ('track', 'path', 'cycleway', 'footway') and bicycle not in ('no',):
-        return 'bike_lane_on_sidewalk'
-    return None
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
 
 
 def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
@@ -406,6 +326,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     print(f'Run name       : {run_name}')
 
     municipalities_gdf = load_gadm_municipalities(country, data_dir)
+    municipalities_gdf['area_km2'] = municipalities_gdf.to_crs(utm_crs).geometry.area.div(1e6).round(2)
 
     gadm_names = sorted(municipalities_gdf[prov_col].unique())
     config_names = {name for name, _ in province_list}
@@ -435,6 +356,16 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     checkpoint_path = f'{run_name}_checkpoint.csv'
     if os.path.exists(checkpoint_path):
         checkpoint_df = pd.read_csv(checkpoint_path)
+        checkpoint_cats = set(checkpoint_df.columns) - {'Region', 'Municipality'}
+        expected_cats = set(CATEGORIES) | set(AMENITY_METRIC_COLUMNS) | {'Municipality area (km²)'}
+        if checkpoint_cats != expected_cats:
+            raise RuntimeError(
+                f'{checkpoint_path} was written by an older/different column '
+                f'schema (columns: {sorted(checkpoint_cats)}) and is not '
+                f'compatible with the current schema '
+                f'({sorted(expected_cats)}). Delete or rename {checkpoint_path} '
+                f'(and the matching *_cycling_by_municipality.csv) and start fresh.'
+            )
         done_munis = set(zip(checkpoint_df['Region'], checkpoint_df['Municipality']))
         municipality_results = checkpoint_df.to_dict('records')
         print(f'Resuming - {len(municipality_results)} municipalities already done.')
@@ -450,6 +381,14 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
         if len(prov_munis) == 0:
             prov_munis = municipalities_gdf[
                 municipalities_gdf[prov_col].str.lower().str.strip() == region_name.lower().strip()
+            ].copy()
+        if len(prov_munis) == 0:
+            # GADM's NAME_1 values have spaces stripped out (e.g. 'LaRioja',
+            # 'PaísVasco') for several regions - fall back to a
+            # space-insensitive match before giving up.
+            target = region_name.lower().strip().replace(' ', '')
+            prov_munis = municipalities_gdf[
+                municipalities_gdf[prov_col].str.lower().str.strip().str.replace(' ', '') == target
             ].copy()
         if len(prov_munis) == 0:
             print(f'[{p_idx+1}/{len(province_list)}] {region_name} - NO GADM MATCH')
@@ -475,14 +414,14 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
             temp_pbf = f'/tmp/muni_{safe_name}.osm.pbf'
 
             print(f'  [{m_idx+1}/{len(remaining)}] {muni_name} ...', end=' ', flush=True)
-            osm = roads = cycling = green = None
+            osm = roads = cycling = None
             try:
                 ok = osmium_extract(str(source_pbf), bbox, temp_pbf)
                 if not ok:
                     raise RuntimeError('osmium extract failed')
 
                 osm = OSM(temp_pbf)
-                roads_raw = osm.get_network(network_type='all', extra_attributes=CYCLING_TAGS)
+                roads_raw = osm.get_network(network_type='all', extra_attributes=EXTRA_OSM_ATTRIBUTES)
                 if roads_raw is None or len(roads_raw) == 0:
                     raise ValueError('No roads found')
                 if len(roads_raw) > max_segments:
@@ -495,9 +434,10 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 del roads_raw
                 roads['length_m'] = roads.geometry.length
 
-                green = get_green_polygons(osm, utm_crs)
-                roads['in_green_space'] = tag_greenway(roads, green)
-                roads['category'] = roads.apply(classify_road, axis=1)
+                cycling_config = get_cycling_config(country, muni_name)
+                roads['category'] = roads.apply(
+                    lambda r: classify_area_road(r, cycling_config), axis=1
+                )
                 cycling = roads[roads['category'].notna()]
 
                 by_cat = (
@@ -507,21 +447,37 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 )
                 total_km = by_cat.sum()
 
-                result_row = {'Region': region_name, 'Municipality': muni_name}
+                pois = osm.get_pois(
+                    custom_filter=BIKE_AMENITY_FILTER,
+                    extra_attributes=BIKE_AMENITY_EXTRA_ATTRIBUTES,
+                )
+                amenity_stats = compute_bike_amenity_stats(pois)
+
+                result_row = {
+                    'Region': region_name,
+                    'Municipality': muni_name,
+                    'Municipality area (km²)': muni_row['area_km2'],
+                }
                 result_row.update(by_cat.to_dict())
+                result_row.update(amenity_stats)
                 municipality_results.append(result_row)
                 done_munis.add((region_name, muni_name))
                 print(f'{total_km:.1f} km  ({len(cycling):,} segments)')
 
             except Exception as exc:
                 print(f'SKIPPED - {exc}')
-                result_row = {'Region': region_name, 'Municipality': muni_name}
+                result_row = {
+                    'Region': region_name,
+                    'Municipality': muni_name,
+                    'Municipality area (km²)': muni_row['area_km2'],
+                }
                 result_row.update({c: 0.0 for c in CATEGORIES})
+                result_row.update({c: 0 for c in AMENITY_METRIC_COLUMNS})
                 municipality_results.append(result_row)
                 done_munis.add((region_name, muni_name))
 
             finally:
-                del osm, roads, cycling, green
+                del osm, roads, cycling
                 gc.collect()
                 try:
                     os.remove(temp_pbf)
@@ -533,16 +489,28 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
         gc.collect()
 
     print('\nDone.')
+    if not municipality_results:
+        raise RuntimeError(
+            'No municipalities were processed - every requested region failed '
+            'to match a GADM municipality. Check the "NO GADM MATCH" warnings '
+            'above against the available GADM names printed earlier.'
+        )
     summary = pd.DataFrame(municipality_results)
     cat_cols = [c for c in CATEGORIES if c in summary.columns]
-    summary = summary[['Region', 'Municipality'] + cat_cols]
-    summary.columns = ['Region', 'Municipality'] + [CATEGORY_LABELS[c] for c in cat_cols]
+    amenity_cols = [c for c in AMENITY_METRIC_COLUMNS if c in summary.columns]
+    summary = summary[['Region', 'Municipality', 'Municipality area (km²)'] + cat_cols + amenity_cols]
 
-    cat_label_cols = [CATEGORY_LABELS[c] for c in cat_cols]
-    summary.insert(2, 'Total Cycling Path km', summary[cat_label_cols].sum(axis=1).round(1))
+    summary.insert(3, 'Total Cycling Path km', summary[cat_cols].sum(axis=1).round(1))
     summary = summary.sort_values(['Region', 'Total Cycling Path km'], ascending=[True, False]).reset_index(drop=True)
 
     out_path = f'{run_name}_cycling_by_municipality.csv'
     summary.to_csv(out_path, index=False)
     print(f'Saved -> {out_path}')
+
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True)
+    png_path = output_dir / f'{run_name}_cycling_by_municipality.png'
+    save_table_png(summary, png_path, title=f'{run_name.replace("_", " ").title()} - cycling infrastructure by municipality')
+    print(f'Saved -> {png_path}')
+
     return summary

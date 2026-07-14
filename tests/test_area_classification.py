@@ -174,6 +174,67 @@ TEST_CASES = [
             "surface": "asphalt", "width": "4",
         },
     ),
+    dict(
+        category="Two-way side bike lane",
+        name="Passeig de Sant Joan (Ejemplo 3)",
+        url="https://www.openstreetmap.org/edit#map=19/41.398792/2.170759",
+        country="spain", municipality="Barcelona",
+        tags={
+            "cycleway:surface": "asphalt", "highway": "cycleway", "lanes": "2",
+            "layer": "1", "lit": "yes", "motor_vehicle": "no",
+            "name": "Passeig de Sant Joan", "oneway": "no", "segregated": "yes",
+            "surface": "asphalt", "width": "2",
+        },
+    ),
+    dict(
+        category="One-way side bike lane",
+        name="Avinguda Diagonal",
+        url="https://www.openstreetmap.org/edit#map=19/41.398642/2.167801",
+        country="spain", municipality="Barcelona",
+        tags={
+            "cycleway:surface": "asphalt", "highway": "cycleway", "lit": "yes",
+            "name": "Avinguda Diagonal", "segregated": "yes", "surface": "asphalt",
+            "width": "4",
+        },
+    ),
+    dict(
+        category="Bus-bike lane",
+        name="Via Laietana",
+        url="https://www.openstreetmap.org/edit#map=20/41.3856865/2.1763170",
+        country="spain", municipality="Barcelona",
+        tags={
+            "cycleway:left": "separate", "cycleway:right": "share_busway",
+            "highway": "secondary", "lanes": "3", "lanes:backward": "1",
+            "lanes:forward": "2", "lit": "yes", "maxspeed": "30",
+            "motor_vehicle:backward": "permit", "name": "Via Laietana",
+            "oneway": "no", "smoothness": "excellent", "surface": "asphalt",
+        },
+    ),
+    dict(
+        # was "Calmed zone <= 10 km/h" under the old Barcelona taxonomy
+        category="Pacified zone at 10 km/h",
+        name="Carrer de Tamarit",
+        url="https://www.openstreetmap.org/edit#map=19/41.378283/2.160448",
+        country="spain", municipality="Barcelona",
+        tags={
+            "cycleway:both": "no", "highway": "living_street", "lanes": "1",
+            "lit": "yes", "maxspeed": "10", "name": "Carrer de Tamarit",
+            "oneway": "yes", "oneway:bicycle": "no", "surface": "asphalt",
+        },
+    ),
+    dict(
+        # was "Shared street 30 km/h" under the old Barcelona taxonomy
+        category="Shared street at 30 km/h",
+        name="Carrer de Sants",
+        url="https://www.openstreetmap.org/edit#map=19/41.375085/2.136874",
+        country="spain", municipality="Barcelona",
+        tags={
+            "bicycle": "yes", "cycleway:both": "share_busway", "foot": "yes",
+            "highway": "tertiary", "lanes": "4", "lit": "yes",
+            "maxspeed": "30", "name": "Carrer de Sants", "oneway": "no",
+            "ref": "N-340", "surface": "asphalt",
+        },
+    ),
 ]
 
 
@@ -205,13 +266,31 @@ KNOWN_FAILING_CASES = {
         "heuristic can't distinguish this from an ordinary urban cycleway, "
         "so it falls through to 'Two-way side bike lane'."
     ),
+    "Avinguda Diagonal": (
+        "No oneway tag present on this way at all (unlike Carrer de Manso / "
+        "Carrer d'Aragó, the other one-way side-lane cases, which both carry "
+        "an explicit oneway=yes). classify_area_road's step-3 two-way rule "
+        "(plain highway=cycleway with is_oneway False) fires by default on a "
+        "missing oneway tag, so this comes out as 'Two-way side bike lane' "
+        "instead of 'One-way side bike lane'."
+    ),
+    "Carrer de Sants": (
+        "Tagged cycleway:both=share_busway, which classify_area_road's step 6 "
+        "matches unconditionally (before the maxspeed cascade) and returns "
+        "'Bus-bike lane' - same rule, and same tag combination, that "
+        "correctly classifies 'Carrer de la Creu Coberta' above. The "
+        "share_busway tag alone can't distinguish 'shares a lane with buses "
+        "operating at 30 km/h' from 'is an actual dedicated bus-bike lane'; "
+        "resolving this needs either a tag-level distinction or confirming "
+        "this way's share_busway tag is itself a mistagging."
+    ),
 }
 # Note: "Carrilet Girona - Sant Feliu de Guíxols" was ALSO a known failure
 # under the old classify_cycling_path_bcn (see test_classification.py's
 # KNOWN_FAILING_CASES), but classify_area_road's tag-only heuristic checks
 # railway=abandoned directly and gets this one right - a genuine improvement
-# over the old classifier for this specific case, despite the two remaining
-# gaps above.
+# over the old classifier for this specific case, despite the remaining gaps
+# above.
 
 
 def _case_param(case):
@@ -234,9 +313,10 @@ def test_overall_accuracy_matches_known_baseline():
     """
     Mirrors test_classification.py's summary test: computes accuracy across
     all real, ground-truthed cases and reports every mismatch at once.
-    Asserts against the CURRENT known baseline (9/11 - see
-    KNOWN_FAILING_CASES) rather than 100%, so this test catches regressions
-    without being permanently red over the two pre-existing, unresolved cases.
+    Asserts against the CURRENT known baseline (n_total - len(KNOWN_FAILING_CASES)
+    - see KNOWN_FAILING_CASES) rather than 100%, so this test catches
+    regressions without being permanently red over the pre-existing,
+    unresolved cases.
     """
     results = []
     for tc in TEST_CASES:

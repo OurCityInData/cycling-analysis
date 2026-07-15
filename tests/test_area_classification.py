@@ -175,6 +175,38 @@ TEST_CASES = [
         },
     ),
     dict(
+        # Real way, verified on openstreetmap.org. highway=track with no
+        # bicycle tag carrying NL:G11 (verplicht fietspad - mandatory
+        # dedicated bike path) - exercises legal_evidence_sign_codes' path/
+        # track cycleway-equivalence check (steps 3-4). Falls through to
+        # None without it (track isn't in CAR_ROADS_HW, no bicycle/foot tag
+        # for the sidewalk-bike-lane branch).
+        category="Two-way side bike lane",
+        name="Noordelijk Slingepad",
+        url="https://www.openstreetmap.org/way/441956959",
+        country="netherlands", municipality=None,
+        tags={
+            "highway": "track", "maxspeed": "60", "mofa": "yes", "moped": "no",
+            "name": "Noordelijk Slingepad", "segregated": "no",
+            "smoothness": "intermediate", "surface": "paving_stones",
+            "tracktype": "grade1", "traffic_sign": "NL:G11",
+        },
+    ),
+    dict(
+        # Real way, verified on openstreetmap.org. highway=footway with no
+        # bicycle tag carrying NL:G11 - exercises legal_evidence_sign_codes'
+        # step-5 sidewalk-bike-lane extension. Falls through to None without
+        # it (footway isn't in CAR_ROADS_HW either).
+        category="Bike lane on sidewalk",
+        name="Stormzwaluw",
+        url="https://www.openstreetmap.org/way/6963072",
+        country="netherlands", municipality=None,
+        tags={
+            "highway": "footway", "moped": "no", "surface": "paving_stones",
+            "traffic_sign": "NL:G11", "name": "Stormzwaluw",
+        },
+    ),
+    dict(
         category="Greenway",
         name="Carrilet Girona - Sant Feliu de Guíxols",
         url="https://www.openstreetmap.org/edit#map=18/41.951875/2.836758",
@@ -185,6 +217,26 @@ TEST_CASES = [
             "maxspeed": "30",
             "railway": "abandoned",
             "source": "Ajuntament de Girona",
+        },
+    ),
+    dict(
+        # Real way, verified on openstreetmap.org. highway=path with no
+        # bicycle tag and railway=abandoned - exercises the step-1 gate's
+        # greenway-evidence exception (_has_unpaved_or_abandoned_evidence).
+        # Before that fix: bicycle=='' and path_default_legal=False (Spain)
+        # -> excluded outright at step 1, never reaches the Greenway check.
+        # After: railway=abandoned rescues it from the gate, then _is_greenway
+        # catches it immediately after.
+        category="Greenway",
+        name="Camí de l'antiga via ferroviària de Manresa a Súria",
+        url="https://www.openstreetmap.org/way/184672814",
+        country="spain", municipality=None,
+        tags={
+            "highway": "path",
+            "historic:end_date": "1996-05-13",
+            "historic:start_date": "1924-08-13",
+            "name": "Camí de l'antiga via ferroviària de Manresa a Súria",
+            "railway": "abandoned",
         },
     ),
     dict(
@@ -286,11 +338,15 @@ def _predict(case):
 # reason classify_area_road currently gets it wrong.
 KNOWN_FAILING_CASES = {
     "Rijwielpad Noordvoort": (
-        "classify_area_road's tag-only Greenway heuristic has no signal to "
-        "key off here: no railway=abandoned, no unpaved surface/tracktype, "
-        "and the NL:G13 mandatory-cycle-path traffic sign isn't read by the "
-        "(currently empty) sign_code_rules extension point. Falls through to "
-        "'Two-way side bike lane' via the plain highway=cycleway rule instead."
+        "Ground truth per domain owner: this is a Greenway. classify_area_road's "
+        "tag-only Greenway heuristic has no signal to key off here (no "
+        "railway=abandoned, no unpaved surface/tracktype), and NL:G13 "
+        "(onverplicht fietspad) is deliberately wired as legal-cycling "
+        "evidence only, not a forced category (CyclingLegalConfig."
+        "legal_evidence_sign_codes) - ~20k other NL ways carry G13 and most "
+        "are ordinary paved paths, not greenways, so force-mapping the sign "
+        "would misclassify those. Falls through to 'Two-way side bike lane' "
+        "via the plain highway=cycleway rule instead."
     ),
     "Shared greenway near Rimini": (
         "Paved (surface=asphalt), segregated=no shared path with no "

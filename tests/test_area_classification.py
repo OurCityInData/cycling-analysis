@@ -109,6 +109,34 @@ TEST_CASES = [
         },
     ),
     dict(
+        category="Bike lane on sidewalk",
+        name="Han Lammersbrug",
+        url="https://www.openstreetmap.org/edit?way=173838280#map=20/52.3830349/4.8913260",
+        country="netherlands", municipality=None,
+        tags={
+            "alt_name": "Voorzitter Stekbrug", "bicycle": "yes", "bridge": "yes",
+            "bridge:ref": "2202", "highway": "footway", "layer": "1", "lit": "yes",
+            "name": "Han Lammersbrug",
+            "panoramax": "a5a1a90c-7eea-4a31-960e-41ba7f0283cd",
+            "smoothness": "good", "surface": "asphalt", "traffic_sign": "NL:G7",
+            "wikidata": "Q2417086",
+            "wikimedia_commons": "Category:Brug 2202, Han Lammersbrug",
+            "wikipedia": "nl:Han Lammersbrug",
+        },
+    ),
+    dict(
+        category="Bike lane on sidewalk",
+        name="Polonceau-kade",
+        url="https://www.openstreetmap.org/edit?way=173838280#map=16/52.38744/4.87231",
+        country="netherlands", municipality=None,
+        tags={
+            "bicycle": "yes", "highway": "footway", "lit": "yes",
+            "name": "Polonceau-kade", "oneway": "no", "smoothness": "intermediate",
+            "surface": "concrete:plates", "surface:colour": "grey", "width": "2.00",
+            "zone:traffic": "NL:urban",
+        },
+    ),
+    dict(
         # was "Calmed zone at 10 km/h" under the old Barcelona taxonomy
         category="Pacified zone at 10 km/h",
         name="Carrer del Comte Borrell (#1)",
@@ -223,8 +251,12 @@ TEST_CASES = [
         },
     ),
     dict(
-        # was "Shared street 30 km/h" under the old Barcelona taxonomy
-        category="Shared street at 30 km/h",
+        # cycleway:both=share_busway - a genuine bus-bike shared lane, not a
+        # plain 30 km/h shared street. Was mislabeled "Shared street at
+        # 30 km/h" in ground truth; classify_area_road's step-6 share_busway
+        # match was correct all along (same rule that correctly classifies
+        # "Carrer de la Creu Coberta" above).
+        category="Bus-bike lane",
         name="Carrer de Sants",
         url="https://www.openstreetmap.org/edit#map=19/41.375085/2.136874",
         country="spain", municipality="Barcelona",
@@ -273,16 +305,6 @@ KNOWN_FAILING_CASES = {
         "(plain highway=cycleway with is_oneway False) fires by default on a "
         "missing oneway tag, so this comes out as 'Two-way side bike lane' "
         "instead of 'One-way side bike lane'."
-    ),
-    "Carrer de Sants": (
-        "Tagged cycleway:both=share_busway, which classify_area_road's step 6 "
-        "matches unconditionally (before the maxspeed cascade) and returns "
-        "'Bus-bike lane' - same rule, and same tag combination, that "
-        "correctly classifies 'Carrer de la Creu Coberta' above. The "
-        "share_busway tag alone can't distinguish 'shares a lane with buses "
-        "operating at 30 km/h' from 'is an actual dedicated bus-bike lane'; "
-        "resolving this needs either a tag-level distinction or confirming "
-        "this way's share_busway tag is itself a mistagging."
     ),
 }
 # Note: "Carrilet Girona - Sant Feliu de Guíxols" was ALSO a known failure

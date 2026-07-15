@@ -28,7 +28,9 @@ AMENITY_METRIC_COLUMNS = [
     'Total parking capacity',
     'Covered parking spots',
     'Covered parking capacity',
-    'Bike shops / rental / repair stations',
+    'Bike shops',
+    'Bike rental stations',
+    'Bike repair stations',
 ]
 
 
@@ -69,8 +71,7 @@ def compute_bike_amenity_stats(pois) -> dict:
         'Total parking capacity': int(capacity.fillna(0).sum()),
         'Covered parking spots': int(covered_mask.sum()),
         'Covered parking capacity': int(capacity[covered_mask].fillna(0).sum()),
-        'Bike shops / rental / repair stations': int(
-            (shop == 'bicycle').sum()
-            + amenity.isin(['bicycle_rental', 'bicycle_repair_station']).sum()
-        ),
+        'Bike shops': int((shop == 'bicycle').sum()),
+        'Bike rental stations': int((amenity == 'bicycle_rental').sum()),
+        'Bike repair stations': int((amenity == 'bicycle_repair_station').sum()),
     }

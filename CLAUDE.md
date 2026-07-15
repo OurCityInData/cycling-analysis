@@ -79,7 +79,7 @@ Each municipality row also gets bike-amenity counts (`cycling_analysis/bike_amen
 
 - `cycling_analysis/constants.py` — `PLAIN_HIGHWAY`, `CYCLEWAY_USEFUL_VALUES`, `CYCLEWAY_LANE_VALUES`, `OSM_KEYS` (shared across all city modules)
 - `cycling_analysis/area_classification.py` — `classify_area_road()`, `CyclingLegalConfig`, `CATEGORIES` (the country-level screening taxonomy — see Classification layer above)
-- `cycling_analysis/bike_amenities.py` — `compute_bike_amenity_stats()`: bicycle parking (spots/capacity/covered) and combined shop+rental+repair-station counts, from OSM POI tags
+- `cycling_analysis/bike_amenities.py` — `compute_bike_amenity_stats()`: bicycle parking (spots/capacity/covered) plus separate `Bike shops` / `Bike rental stations` / `Bike repair stations` counts, from OSM POI tags
 - `cycling_analysis/bikeneat.py` — BikeNEAT predicate engine (shared by Barcelona and Freiburg); its German StVO traffic-sign logic was deliberately NOT ported into `classify_area_road()` — `CyclingLegalConfig.sign_code_rules` is an empty opt-in extension point for that, per-country, once someone verifies sign-tagging density
 - `cycling_analysis/cities/amsterdam.py` and `cities/barcelona.py` — city-specific metrics and plotting (intentionally separate interfaces)
 - `tests/test_classification.py` — 11 ground-truthed real-world OSM ways for the Barcelona classifier; 3 marked `xfail` (all `highway=cycleway` cases with no distinguishing signal for rural/off-road greenways)

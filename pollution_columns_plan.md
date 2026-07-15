@@ -1,6 +1,31 @@
 # Plan: Adding pollution columns to `country_analysis.py`
 
-Status: **planning only — no code changes made.** Scope confirmed with you: Spain-only for now, EEA as primary data source (unverified E2a dataset, not waiting for verified data), blank-but-zone-filled for no-station municipalities, daily-max-hourly proxy for NO2, RedBici doc's stated PM2.5 short-term limit used as-is, and columns 1–3 computed as a median across daily values for the year (not a median of station annual means). All open items from the last round are now resolved — see §7/§8.
+Status: **columns 1–4 built and validated; not yet wired into the pipeline output.** Scope confirmed with you: Spain-only for now, EEA as primary data source (unverified E2a dataset, not waiting for verified data), blank-but-zone-filled for no-station municipalities, daily-max-hourly proxy for NO2, RedBici doc's stated PM2.5 short-term limit used as-is, and columns 1–3 computed as a median across daily values for the year (not a median of station annual means). All open items from the last round are now resolved — see §7/§8.
+
+---
+
+## 0. Progress so far / what's left for next session
+
+**Branch:** `feat/pollution-columns`, cut off `main` (separate from the Barcelona area-classification test branch). Committed locally, **not pushed to GitHub yet** — waiting for the go-ahead.
+
+**Done (columns 1–4, "own-municipality" stats):**
+- `cycling_analysis/pollution.py` implements `fetch_eea_stations()`, `fetch_eea_measurements()`, `compute_daily_means()`, `compute_own_station_pollution_stats()` — the 4 columns (PM2.5/PM10/NO2 median annual + station count).
+- Built against the **real, live EEA API** (not just the how-to PDF) — see CLAUDE.md's new "Pollution columns" section for the specifics found along the way that corrected assumptions in this plan doc:
+  - The E2a/unverified dataset is **hourly-only** via `ParquetFile/urls` — requesting `aggregationType: "day"` returns zero files, contrary to what the web UI's filter description implies. So daily means are always derived from hourly data in code (`compute_daily_means()`), not fetched pre-aggregated — this was already required by §5's "median across pooled daily values" definition, just confirms there's no shortcut.
+  - Station coordinates live in a separate EEA-wide metadata CSV (`discomap.eea.europa.eu/map/fme/metadata/PanEuropean_metadata.csv`), which 403s the default `requests` User-Agent (needs a browser-like UA) and uses a different sampling-point ID format than the measurement files (missing the country prefix) — both handled in `fetch_eea_stations()`.
+  - Some stations run two parallel sampling processes for the same pollutant (continuous automatic analyser + periodic manual reference sampler) — deduped to the automatic one to avoid double-counting that station in the pooled median.
+  - Confirmed pollutant vocabulary codes: PM10 = `.../pollutant/5`, PM2.5 = `.../pollutant/6001`, NO2 = `.../pollutant/8`.
+- `tests/test_pollution.py` — 7 unit tests on the pure-computation functions (pooling/median logic, station-count dedup, point-in-polygon matching), no network calls. Full suite (`pytest tests/`) passes: 31 passed, 5 xfail.
+- **Manually validated against Barcelona municipality, 2025 data:** 12 distinct stations, PM2.5 median 9.8 µg/m³, PM10 median 17.9 µg/m³, NO2 median 17.6 µg/m³ — all plausible (NO2 reads lower than commonly-cited Barcelona averages, but that's expected: this pools every in-boundary station including suburban/background ones and takes a median, not a traffic-station-weighted mean).
+- `pyarrow>=14.0` added to `requirements.txt` (needed to read the EEA parquet files).
+- `CLAUDE.md` updated in the same commit with the architecture + all the API gotchas above, so a future session doesn't have to rediscover them.
+
+**Left to do, roughly in order:**
+1. **Wire columns 1–4 into `run_country_analysis()`** (`cycling_analysis/country.py`) so they actually show up in the CSV/checkpoint output for a real Spain run. This bumps the checkpoint schema (per `CLAUDE.md`'s versioning convention) — old Spain checkpoints will need deleting. Needs a decision on *when* to fetch: stations + a year of hourly data for PM2.5/PM10/NO2 should be fetched **once per country run**, before the municipality loop starts (like the GADM/PBF downloads), not per-municipality — the municipality loop should only do the cheap in-memory point-in-polygon join + pooling.
+2. Run it for real against at least one region (e.g. Cataluña) and spot-check a few more municipalities beyond Barcelona.
+3. Push the branch and open a PR once you're happy with 1–4 (currently sitting local-only, per your instruction not to push until told).
+4. **Then, a separate phase: columns 5–6** (zone-based legal-compliance day counts, §4 rows 5.1–6.3). Still needs, per §8: pinning down the exact zone-code field name in the EEA station/zone metadata, downloading the zone/agglomeration geometries (`discomap.eea.europa.eu/map/FME/AQZones/`), and the "worst station in zone" logic described in §3. None of this has been started.
+5. `country.py`'s per-country loop currently isn't Spain-specific — decide how non-Spain countries should populate these 4 columns (blank/NaN throughout is the obvious default, consistent with the no-station-municipality behavior already planned in §7).
 
 ---
 
@@ -106,12 +131,12 @@ Sources: [BOE-A-2011-1645](https://www.boe.es/buscar/act.php?id=BOE-A-2011-1645)
 
 ## 9. Suggested build order (once you're ready to code)
 
-1. Write `fetch_eea_stations()` + cache; sanity-check it returns Spanish stations with coordinates and zone codes.
-2. Point-in-polygon match against the existing Zeeland-style GADM municipality flow already in `country.py` — reuse, don't reinvent.
-3. Pull one pollutant/one year/one country of E2a daily data by hand for a known city (Barcelona) and manually sanity-check the median/station-count columns before automating.
-4. Add zone geometry matching + worst-station-in-zone logic; validate against MITECO's own last *official* evaluation (2023, published Oct 2024) as ground truth, since that's a year where verified data exists on both sides.
-5. Only then wire the hourly-based NO2 proxy and the WHO comparisons, since those are the fiddliest bits.
-6. Add the 10 columns to `country_analysis.py`'s output, following the existing checkpoint-schema-versioning convention (`CLAUDE.md` is explicit that changing the column set requires bumping/deleting old checkpoints — this will trigger that).
+1. ~~Write `fetch_eea_stations()` + cache; sanity-check it returns Spanish stations with coordinates and zone codes.~~ **Done** — `cycling_analysis/pollution.py`. (Zone codes specifically: still not pulled in — see §8, deferred to step 4 below since it's only needed for columns 5-6.)
+2. ~~Point-in-polygon match against the existing Zeeland-style GADM municipality flow already in `country.py` — reuse, don't reinvent.~~ **Done** — `match_stations_to_municipality()`, validated against real GADM Spain (`data/gadm41_ESP_4.geojson`).
+3. ~~Pull one pollutant/one year/one country of E2a daily data by hand for a known city (Barcelona) and manually sanity-check the median/station-count columns before automating.~~ **Done** — see §0 for the actual numbers.
+4. Add zone geometry matching + worst-station-in-zone logic; validate against MITECO's own last *official* evaluation (2023, published Oct 2024) as ground truth, since that's a year where verified data exists on both sides. **Not started.**
+5. Only then wire the hourly-based NO2 proxy and the WHO comparisons, since those are the fiddliest bits. **Not started.**
+6. Add the 10 columns to `country_analysis.py`'s output, following the existing checkpoint-schema-versioning convention (`CLAUDE.md` is explicit that changing the column set requires bumping/deleting old checkpoints — this will trigger that). **Partially applicable now**: columns 1-4 are ready to wire in (see §0 item 1) without waiting for steps 4-5 above.
 
 ---
 

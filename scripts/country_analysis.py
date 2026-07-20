@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from cycling_analysis.area_classification import CATEGORIES
 from cycling_analysis.bike_amenities import AMENITY_METRIC_COLUMNS
 from cycling_analysis.country import REGIONS, run_country_analysis
+from cycling_analysis.pollution import POLLUTION_COLUMNS
 
 
 def main():
@@ -37,6 +38,9 @@ def main():
     parser.add_argument('--max-segments', type=int, default=30_000,
                          help='Skip a municipality if its road network exceeds this many '
                               'segments (guards against RAM blowups from bbox overcounts)')
+    parser.add_argument('--pollution-year', type=int, default=2025,
+                         help='Year of EEA hourly data to pool for the pollution columns '
+                              '(Spain only for now)')
     args = parser.parse_args()
 
     summary = run_country_analysis(
@@ -44,6 +48,7 @@ def main():
         filter_regions=args.regions,
         data_dir=Path(args.data_dir),
         max_segments=args.max_segments,
+        pollution_year=args.pollution_year,
     )
 
     print(f'\nShape: {summary.shape[0]} municipalities x {summary.shape[1]} columns')
@@ -70,6 +75,18 @@ def main():
         print('\nBike amenities (nationwide totals):')
         for col in amenity_cols:
             print(f'  {col:<40} {summary[col].sum():>10,.0f}')
+
+    pollution_cols = [c for c in POLLUTION_COLUMNS if c in summary.columns]
+    if pollution_cols:
+        n_with_stations = (summary['Station count'] > 0).sum()
+        print(f'\nPollution columns: {n_with_stations}/{len(summary)} municipalities have >=1 station')
+        for col in pollution_cols:
+            if col == 'Station count':
+                continue
+            valid = summary[col].dropna()
+            if len(valid):
+                print(f'  {col:<35} median {valid.median():>6.1f}  '
+                      f'(n={len(valid)}, range {valid.min():.1f}-{valid.max():.1f})')
 
 
 if __name__ == '__main__':

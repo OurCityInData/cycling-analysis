@@ -22,6 +22,7 @@ checkpoint-resumable loop, but as a function taking those as parameters
 import gc
 import io
 import os
+import re
 import subprocess
 import unicodedata
 import zipfile
@@ -302,6 +303,48 @@ def save_table_png(df: pd.DataFrame, out_path: Path, title: str = None) -> None:
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
 
 
+def slugify_column(name: str) -> str:
+    """
+    Display column name -> snake_case ASCII identifier for save_database_csv()
+    (e.g. 'PM2.5 median annual (µg/m³)' -> 'pm2_5_median_annual_ug_m3') - unlike
+    ascii_slug() above (which strips accents from proper nouns for filenames),
+    this also has to survive unit/symbol-heavy metric names (µ, ², ³, /, %) that
+    most database column-name rules reject. A leading-digit result (e.g.
+    '2-1 road' -> '_2_1_road') gets a leading underscore, since SQL generally
+    requires identifiers not to start with a digit.
+    """
+    name = name.replace('µ', 'u').replace('²', '2').replace('³', '3')
+    name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode()
+    name = re.sub(r'[^a-zA-Z0-9]+', '_', name).strip('_').lower()
+    return f'_{name}' if name[:1].isdigit() else name
+
+
+def save_database_csv(summary: pd.DataFrame, out_path: Path, *,
+                       country: str, run_name: str, pollution_year: int = None) -> None:
+    """
+    The same municipality-by-municipality data as the main CSV/PNG, reshaped
+    for later ingestion into a webapp/backend/database rather than for human
+    reading: snake_case ASCII column names (slugify_column()) instead of
+    display strings with units/symbols/spaces, plus a few columns a database
+    table would need that the display table doesn't:
+    - `country`, `run_name`, `pollution_year`, `generated_at` (UTC, ISO 8601) -
+      constant across every row in one run, but necessary once rows from
+      multiple runs/countries/dates end up pooled in one table.
+    - `gadm_id` (from the `GADM ID` column already carried through
+      run_country_analysis() - GADM's own stable per-municipality ID, e.g.
+      'ESP.1.1.1.1_1') as a real primary/foreign key - `region`+`municipality`
+      display names are NOT reliable join keys (GADM strips spaces from some
+      Spanish region/municipality names inconsistently, and accents vary by
+      source).
+    """
+    db_df = summary.rename(columns={c: slugify_column(c) for c in summary.columns})
+    db_df.insert(0, 'generated_at', pd.Timestamp.now(tz='UTC').isoformat())
+    db_df.insert(0, 'pollution_year', pollution_year)
+    db_df.insert(0, 'run_name', run_name)
+    db_df.insert(0, 'country', country)
+    db_df.to_csv(out_path, index=False)
+
+
 def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                           max_segments=MAX_SEGMENTS, run_name=None, pollution_year=2025):
     """
@@ -335,6 +378,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
 
     prov_col = GADM_CONFIG[country]['province_col']
     muni_col = GADM_CONFIG[country]['muni_col']
+    gid_col = f"GID_{GADM_CONFIG[country]['level']}"
 
     if run_name is None:
         if filter_regions:
@@ -411,7 +455,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     checkpoint_path = f'{run_name}_checkpoint.csv'
     if os.path.exists(checkpoint_path):
         checkpoint_df = pd.read_csv(checkpoint_path)
-        checkpoint_cats = set(checkpoint_df.columns) - {'Region', 'Municipality'}
+        checkpoint_cats = set(checkpoint_df.columns) - {'Region', 'Municipality', 'GADM ID'}
         expected_cats = (
             set(CATEGORIES) | set(AMENITY_METRIC_COLUMNS) | set(POLLUTION_COLUMNS)
             | {'Municipality area (km²)'}
@@ -531,6 +575,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 result_row = {
                     'Region': region_name,
                     'Municipality': muni_name,
+                    'GADM ID': muni_row[gid_col],
                     'Municipality area (km²)': muni_row['area_km2'],
                 }
                 result_row.update(by_cat.to_dict())
@@ -545,6 +590,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 result_row = {
                     'Region': region_name,
                     'Municipality': muni_name,
+                    'GADM ID': muni_row[gid_col],
                     'Municipality area (km²)': muni_row['area_km2'],
                 }
                 result_row.update({c: 0.0 for c in CATEGORIES})
@@ -576,9 +622,9 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     cat_cols = [c for c in CATEGORIES if c in summary.columns]
     amenity_cols = [c for c in AMENITY_METRIC_COLUMNS if c in summary.columns]
     pollution_cols = [c for c in POLLUTION_COLUMNS if c in summary.columns]
-    summary = summary[['Region', 'Municipality', 'Municipality area (km²)'] + cat_cols + amenity_cols + pollution_cols]
+    summary = summary[['Region', 'Municipality', 'GADM ID', 'Municipality area (km²)'] + cat_cols + amenity_cols + pollution_cols]
 
-    summary.insert(3, 'Total Cycling Path km', summary[cat_cols].sum(axis=1).round(1))
+    summary.insert(4, 'Total Cycling Path km', summary[cat_cols].sum(axis=1).round(1))
     summary = summary.sort_values(['Region', 'Total Cycling Path km'], ascending=[True, False]).reset_index(drop=True)
 
     out_path = f'{run_name}_cycling_by_municipality.csv'
@@ -603,5 +649,16 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
             title=f'{run_name.replace("_", " ").title()} - air quality by municipality',
         )
         print(f'Saved -> {pollution_png_path}')
+
+    # Database/webapp-ready CSV alongside the human-facing PNG/CSV above -
+    # snake_case columns + a stable gadm_id + run metadata, see
+    # save_database_csv()'s docstring for why this is a separate file rather
+    # than just this same summary.
+    db_csv_path = output_dir / f'{run_name}_municipalities.csv'
+    save_database_csv(
+        summary, db_csv_path, country=country, run_name=run_name,
+        pollution_year=pollution_year if pollution_country_code else None,
+    )
+    print(f'Saved -> {db_csv_path}')
 
     return summary

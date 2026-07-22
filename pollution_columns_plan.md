@@ -39,10 +39,14 @@ Status: **all 10 columns built, validated, and wired into the pipeline output** 
 - Re-ran La Rioja after moving the stale checkpoint aside (schema unchanged, but *values* changed, so a checkpoint resume would have kept the old mostly-blank rows): all 177 municipalities now have non-blank PM2.5/PM10/NO2 medians. Spot-checked Logroño (own PM10/NO2 station, no own PM2.5 station): own PM10 (16.0) and NO2 (13.8) unchanged, only PM2.5 (7.1) came from the zone tier - confirms the fallback is per-pollutant, not per-municipality.
 - `tests/test_pollution.py` - 10 more unit tests (`pooled_median`, `sampling_points_in_zones`, `find_nearest_stations`, `estimate_own_pollution_stats`'s 3 tiers). Full suite: 48 passed, 5 xfail.
 
+**Done (full Cataluña run):**
+- Ran the full pipeline end-to-end against Cataluña (955 municipalities via GADM) — roads + amenities + pollution together, including the columns 1-3 fallback. 953/955 municipalities completed; see CLAUDE.md's Known gaps for the 2 that were lost to a resume bug (below) before it was fixed.
+- **Found and fixed a resume/checkpoint bug**: `run_country_analysis()` deduped completed municipalities by `(Region, Municipality)` name instead of `GADM ID`. GADM municipality names aren't unique within a region — Cataluña has 8 same-named pairs across different comarques (e.g. two `Pinós`) — so if a checkpoint save landed between processing two same-named municipalities, the resume logic would treat the second as "already done" and permanently skip it. Fixed in `cycling_analysis/country.py` to key on `GADM ID` throughout. Not backfilled into the existing Cataluña output per instruction — a re-run would pick up just the 2 missing rows via the now-fixed checkpoint resume.
+- Pollution columns held up at Cataluña scale: 70/953 municipalities have their own station; the zone/nearest-station fallback fills the rest, consistent with the La Rioja validation.
+
 **Left to do, roughly in order:**
-1. Run the full pipeline for real against a larger region (e.g. Cataluña) end-to-end (roads + amenities + pollution together, now including the columns 1-3 fallback) and spot-check a few more municipalities. Delete/move the stale `spain_cataluna_checkpoint.csv` first (old schema, predates even columns 1-4).
-2. Push the branch and open a PR once you're happy with the full 10-column output (currently sitting local-only, per your instruction not to push until told).
-3. Cross-check columns 5-6 against MITECO's official 2023 compliance evaluation (§9 step 4) — not done yet; would need a separate historical `pollution_year=2023` pull since the pipeline currently targets 2025.
+1. Push the branch and open a PR once you're happy with the full 10-column output (currently sitting local-only, per your instruction not to push until told).
+2. Cross-check columns 5-6 against MITECO's official 2023 compliance evaluation (§9 step 4) — not done yet; would need a separate historical `pollution_year=2023` pull since the pipeline currently targets 2025.
 
 ---
 

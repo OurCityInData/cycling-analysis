@@ -468,7 +468,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 f'({sorted(expected_cats)}). Delete or rename {checkpoint_path} '
                 f'(and the matching *_cycling_by_municipality.csv) and start fresh.'
             )
-        done_munis = set(zip(checkpoint_df['Region'], checkpoint_df['Municipality']))
+        done_munis = set(checkpoint_df['GADM ID'])
         municipality_results = checkpoint_df.to_dict('records')
         print(f'Resuming - {len(municipality_results)} municipalities already done.')
     else:
@@ -498,7 +498,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
 
         remaining = [
             row for _, row in prov_munis.iterrows()
-            if (region_name, row[muni_col]) not in done_munis
+            if row[gid_col] not in done_munis
         ]
         if not remaining:
             print(f'[{p_idx+1}/{len(province_list)}] {region_name} - already complete, skipping.')
@@ -582,7 +582,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 result_row.update(amenity_stats)
                 result_row.update(pollution_stats)
                 municipality_results.append(result_row)
-                done_munis.add((region_name, muni_name))
+                done_munis.add(muni_row[gid_col])
                 print(f'{total_km:.1f} km  ({len(cycling):,} segments)')
 
             except Exception as exc:
@@ -597,7 +597,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 result_row.update({c: 0 for c in AMENITY_METRIC_COLUMNS})
                 result_row.update(pollution_stats)
                 municipality_results.append(result_row)
-                done_munis.add((region_name, muni_name))
+                done_munis.add(muni_row[gid_col])
 
             finally:
                 del osm, roads, cycling

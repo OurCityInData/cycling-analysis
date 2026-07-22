@@ -9,3 +9,5 @@ networkx>=3.0
 requests>=2.28
 tqdm>=4.65
 pytest>=7.4
+pyarrow>=14.0
+ijson>=3.2

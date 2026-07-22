@@ -61,6 +61,11 @@ from .pollution import (
     match_stations_to_municipality,
     match_stations_to_zones,
 )
+from .population import (
+    POPULATION_COLUMNS,
+    compute_population_stats,
+    fetch_population_raster,
+)
 
 # pollution.py is Spain-only for now (see CLAUDE.md's Known gaps) - every
 # other country gets blank/NaN columns 1-10, same as a Spanish municipality
@@ -357,7 +362,10 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
         or None for the whole country.
     pollution_year: year of EEA hourly data to pool for the pollution columns
         (Spain only - see POLLUTION_COUNTRIES). Ignored for other countries.
-    Returns the summary DataFrame (also written to `{run_name}_cycling_by_municipality.csv`).
+    Returns the summary DataFrame (including `GADM ID`) - note the CSV/PNG written
+    to `{run_name}_cycling_by_municipality.csv`/`.png` drop that column since it's
+    an internal join/resume key, not something a human reader needs; the
+    database-ready `{run_name}_municipalities.csv` keeps it as `gadm_id`.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(exist_ok=True, parents=True)
@@ -400,6 +408,17 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     # pollution.estimate_own_pollution_stats()'s nearest-station fallback,
     # which needs a real-distance centroid, not a per-call reprojection.
     municipalities_gdf['centroid_utm'] = municipalities_utm.geometry.centroid
+
+    # Population (all 5 countries, unlike the Spain-only pollution columns) -
+    # zonal-summed once per country, in the GDF's native WGS84 CRS (matching
+    # the WorldPop raster's CRS), same "computed in bulk before the loop"
+    # shape as area_km2 above rather than per-row like the pollution columns.
+    print('Fetching WorldPop population raster ...')
+    population_raster_path = fetch_population_raster(GADM_CODES[country], data_dir)
+    municipalities_gdf = compute_population_stats(municipalities_gdf, population_raster_path)
+    municipalities_gdf['population_density'] = (
+        municipalities_gdf['population'] / municipalities_gdf['area_km2']
+    ).round(2)
 
     gadm_names = sorted(municipalities_gdf[prov_col].unique())
     config_names = {name for name, _ in province_list}
@@ -458,7 +477,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
         checkpoint_cats = set(checkpoint_df.columns) - {'Region', 'Municipality', 'GADM ID'}
         expected_cats = (
             set(CATEGORIES) | set(AMENITY_METRIC_COLUMNS) | set(POLLUTION_COLUMNS)
-            | {'Municipality area (km²)'}
+            | set(POPULATION_COLUMNS) | {'Municipality area (km²)'}
         )
         if checkpoint_cats != expected_cats:
             raise RuntimeError(
@@ -577,6 +596,8 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                     'Municipality': muni_name,
                     'GADM ID': muni_row[gid_col],
                     'Municipality area (km²)': muni_row['area_km2'],
+                    'Population': muni_row['population'],
+                    'Population density (per km²)': muni_row['population_density'],
                 }
                 result_row.update(by_cat.to_dict())
                 result_row.update(amenity_stats)
@@ -592,6 +613,8 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                     'Municipality': muni_name,
                     'GADM ID': muni_row[gid_col],
                     'Municipality area (km²)': muni_row['area_km2'],
+                    'Population': muni_row['population'],
+                    'Population density (per km²)': muni_row['population_density'],
                 }
                 result_row.update({c: 0.0 for c in CATEGORIES})
                 result_row.update({c: 0 for c in AMENITY_METRIC_COLUMNS})
@@ -622,19 +645,28 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     cat_cols = [c for c in CATEGORIES if c in summary.columns]
     amenity_cols = [c for c in AMENITY_METRIC_COLUMNS if c in summary.columns]
     pollution_cols = [c for c in POLLUTION_COLUMNS if c in summary.columns]
-    summary = summary[['Region', 'Municipality', 'GADM ID', 'Municipality area (km²)'] + cat_cols + amenity_cols + pollution_cols]
+    summary = summary[
+        ['Region', 'Municipality', 'GADM ID', 'Municipality area (km²)'] + POPULATION_COLUMNS
+        + cat_cols + amenity_cols + pollution_cols
+    ]
 
-    summary.insert(4, 'Total Cycling Path km', summary[cat_cols].sum(axis=1).round(1))
+    summary.insert(6, 'Total Cycling Path km', summary[cat_cols].sum(axis=1).round(1))
     summary = summary.sort_values(['Region', 'Total Cycling Path km'], ascending=[True, False]).reset_index(drop=True)
 
+    # GADM ID is an internal join/resume key (checkpoint resume, save_database_csv's
+    # gadm_id), not something a human reader of the CSV/PNG table needs to see -
+    # dropped from the human-facing outputs only; `summary` (with GADM ID intact)
+    # is still what's returned and what save_database_csv() gets below.
+    display_summary = summary.drop(columns=['GADM ID'])
+
     out_path = f'{run_name}_cycling_by_municipality.csv'
-    summary.to_csv(out_path, index=False)
+    display_summary.to_csv(out_path, index=False)
     print(f'Saved -> {out_path}')
 
     output_dir = Path('output')
     output_dir.mkdir(exist_ok=True)
     png_path = output_dir / f'{run_name}_cycling_by_municipality.png'
-    save_table_png(summary, png_path, title=f'{run_name.replace("_", " ").title()} - cycling infrastructure by municipality')
+    save_table_png(display_summary, png_path, title=f'{run_name.replace("_", " ").title()} - cycling infrastructure by municipality')
     print(f'Saved -> {png_path}')
 
     # Separate pollution-only table (columns 1-10, pollution_columns_plan.md)
@@ -643,7 +675,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     # run would otherwise render a table of nothing but blanks.
     if pollution_country_code:
         pollution_png_path = output_dir / f'{run_name}_pollution_by_municipality.png'
-        pollution_table = summary[['Region', 'Municipality'] + pollution_cols]
+        pollution_table = display_summary[['Region', 'Municipality'] + pollution_cols]
         save_table_png(
             pollution_table, pollution_png_path,
             title=f'{run_name.replace("_", " ").title()} - air quality by municipality',

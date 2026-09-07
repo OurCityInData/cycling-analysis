@@ -22,6 +22,7 @@ checkpoint-resumable loop, but as a function taking those as parameters
 import gc
 import io
 import os
+import re
 import subprocess
 import unicodedata
 import zipfile
@@ -47,6 +48,24 @@ from .bike_amenities import (
     BIKE_AMENITY_FILTER,
     compute_bike_amenity_stats,
 )
+from .pollution import (
+    POLLUTION_COLUMNS,
+    compute_daily_max_hourly,
+    compute_daily_means,
+    compute_zone_pollution_stats,
+    estimate_own_pollution_stats,
+    fetch_eea_measurements,
+    fetch_eea_stations,
+    fetch_zone_geometries,
+    match_municipality_to_zones,
+    match_stations_to_municipality,
+    match_stations_to_zones,
+)
+
+# pollution.py is Spain-only for now (see CLAUDE.md's Known gaps) - every
+# other country gets blank/NaN columns 1-10, same as a Spanish municipality
+# with 0 stations.
+POLLUTION_COUNTRIES = {'spain': 'ES'}
 
 # ── Sub-region PBF sources ───────────────────────────────────────────────────
 # Each entry: (sub_region_name, geofabrik_url). sub_region_name must match the
@@ -229,10 +248,13 @@ def save_table_png(df: pd.DataFrame, out_path: Path, title: str = None) -> None:
     """
     n_rows, n_cols = df.shape
     col_labels = list(df.columns)
-    cell_text = [
-        [f'{v:,.1f}' if isinstance(v, (int, float, np.floating)) else str(v) for v in row]
-        for row in df.itertuples(index=False)
-    ]
+
+    def _cell(v):
+        if isinstance(v, (int, float, np.floating)):
+            return '' if pd.isna(v) else f'{v:,.1f}'
+        return str(v)
+
+    cell_text = [[_cell(v) for v in row] for row in df.itertuples(index=False)]
 
     # Column headers (e.g. "Pacified street at 20 km/h") are usually far
     # longer than the numbers underneath them - size each column off the
@@ -281,8 +303,50 @@ def save_table_png(df: pd.DataFrame, out_path: Path, title: str = None) -> None:
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
 
 
+def slugify_column(name: str) -> str:
+    """
+    Display column name -> snake_case ASCII identifier for save_database_csv()
+    (e.g. 'PM2.5 median annual (µg/m³)' -> 'pm2_5_median_annual_ug_m3') - unlike
+    ascii_slug() above (which strips accents from proper nouns for filenames),
+    this also has to survive unit/symbol-heavy metric names (µ, ², ³, /, %) that
+    most database column-name rules reject. A leading-digit result (e.g.
+    '2-1 road' -> '_2_1_road') gets a leading underscore, since SQL generally
+    requires identifiers not to start with a digit.
+    """
+    name = name.replace('µ', 'u').replace('²', '2').replace('³', '3')
+    name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode()
+    name = re.sub(r'[^a-zA-Z0-9]+', '_', name).strip('_').lower()
+    return f'_{name}' if name[:1].isdigit() else name
+
+
+def save_database_csv(summary: pd.DataFrame, out_path: Path, *,
+                       country: str, run_name: str, pollution_year: int = None) -> None:
+    """
+    The same municipality-by-municipality data as the main CSV/PNG, reshaped
+    for later ingestion into a webapp/backend/database rather than for human
+    reading: snake_case ASCII column names (slugify_column()) instead of
+    display strings with units/symbols/spaces, plus a few columns a database
+    table would need that the display table doesn't:
+    - `country`, `run_name`, `pollution_year`, `generated_at` (UTC, ISO 8601) -
+      constant across every row in one run, but necessary once rows from
+      multiple runs/countries/dates end up pooled in one table.
+    - `gadm_id` (from the `GADM ID` column already carried through
+      run_country_analysis() - GADM's own stable per-municipality ID, e.g.
+      'ESP.1.1.1.1_1') as a real primary/foreign key - `region`+`municipality`
+      display names are NOT reliable join keys (GADM strips spaces from some
+      Spanish region/municipality names inconsistently, and accents vary by
+      source).
+    """
+    db_df = summary.rename(columns={c: slugify_column(c) for c in summary.columns})
+    db_df.insert(0, 'generated_at', pd.Timestamp.now(tz='UTC').isoformat())
+    db_df.insert(0, 'pollution_year', pollution_year)
+    db_df.insert(0, 'run_name', run_name)
+    db_df.insert(0, 'country', country)
+    db_df.to_csv(out_path, index=False)
+
+
 def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
-                          max_segments=MAX_SEGMENTS, run_name=None):
+                          max_segments=MAX_SEGMENTS, run_name=None, pollution_year=2025):
     """
     Municipality-by-municipality cycling infrastructure screen, resumable via
     a `{run_name}_checkpoint.csv` file (safe to Ctrl-C and re-run).
@@ -291,6 +355,8 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     filter_regions: list of sub-region names to run (must match GADM province_col
         values - run once with a bad name to see the diagnostic mismatch printout),
         or None for the whole country.
+    pollution_year: year of EEA hourly data to pool for the pollution columns
+        (Spain only - see POLLUTION_COUNTRIES). Ignored for other countries.
     Returns the summary DataFrame (also written to `{run_name}_cycling_by_municipality.csv`).
     """
     data_dir = Path(data_dir)
@@ -312,6 +378,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
 
     prov_col = GADM_CONFIG[country]['province_col']
     muni_col = GADM_CONFIG[country]['muni_col']
+    gid_col = f"GID_{GADM_CONFIG[country]['level']}"
 
     if run_name is None:
         if filter_regions:
@@ -326,7 +393,13 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     print(f'Run name       : {run_name}')
 
     municipalities_gdf = load_gadm_municipalities(country, data_dir)
-    municipalities_gdf['area_km2'] = municipalities_gdf.to_crs(utm_crs).geometry.area.div(1e6).round(2)
+    municipalities_utm = municipalities_gdf.to_crs(utm_crs)
+    municipalities_gdf['area_km2'] = municipalities_utm.geometry.area.div(1e6).round(2)
+    # Computed once per country/run, in UTM (real meters) rather than per
+    # municipality/pollutant in the loop below - see
+    # pollution.estimate_own_pollution_stats()'s nearest-station fallback,
+    # which needs a real-distance centroid, not a per-call reprojection.
+    municipalities_gdf['centroid_utm'] = municipalities_utm.geometry.centroid
 
     gadm_names = sorted(municipalities_gdf[prov_col].unique())
     config_names = {name for name, _ in province_list}
@@ -353,11 +426,40 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                     print(f'Cached: {pbf_path.name}')
                 seen_urls.add(url)
 
+    # Pollution columns 1-10 (Spain only for now): fetch stations, zone
+    # geometries, and a year of hourly PM2.5/PM10/NO2 data ONCE per country
+    # run, before the municipality loop - like the GADM/PBF downloads above,
+    # not per municipality. The loop itself only does cheap in-memory
+    # point-in-polygon / intersects joins + pooling against these.
+    pollution_country_code = POLLUTION_COUNTRIES.get(country)
+    station_gdf = None
+    station_gdf_utm = None
+    zone_stations_gdf = None
+    zones_gdf = None
+    daily_means_by_pollutant = {}
+    daily_max_by_pollutant = {}
+    if pollution_country_code:
+        print(f'Fetching EEA station metadata + zone geometries + {pollution_year} hourly '
+              f'measurements for pollution columns ...')
+        station_gdf = fetch_eea_stations(pollution_country_code, data_dir)
+        station_gdf_utm = station_gdf.to_crs(utm_crs)
+        zones_gdf = fetch_zone_geometries(pollution_country_code, data_dir)
+        zone_stations_gdf = match_stations_to_zones(station_gdf, zones_gdf)
+        for pollutant in ['PM2.5', 'PM10', 'NO2']:
+            hourly = fetch_eea_measurements(pollution_country_code, pollutant, pollution_year, data_dir)
+            daily_means_by_pollutant[pollutant] = compute_daily_means(hourly)
+            daily_max_by_pollutant[pollutant] = compute_daily_max_hourly(hourly)
+            print(f'  {pollutant}: {hourly["Samplingpoint"].nunique()} sampling points, '
+                  f'{len(hourly):,} hourly readings')
+
     checkpoint_path = f'{run_name}_checkpoint.csv'
     if os.path.exists(checkpoint_path):
         checkpoint_df = pd.read_csv(checkpoint_path)
-        checkpoint_cats = set(checkpoint_df.columns) - {'Region', 'Municipality'}
-        expected_cats = set(CATEGORIES) | set(AMENITY_METRIC_COLUMNS) | {'Municipality area (km²)'}
+        checkpoint_cats = set(checkpoint_df.columns) - {'Region', 'Municipality', 'GADM ID'}
+        expected_cats = (
+            set(CATEGORIES) | set(AMENITY_METRIC_COLUMNS) | set(POLLUTION_COLUMNS)
+            | {'Municipality area (km²)'}
+        )
         if checkpoint_cats != expected_cats:
             raise RuntimeError(
                 f'{checkpoint_path} was written by an older/different column '
@@ -366,7 +468,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 f'({sorted(expected_cats)}). Delete or rename {checkpoint_path} '
                 f'(and the matching *_cycling_by_municipality.csv) and start fresh.'
             )
-        done_munis = set(zip(checkpoint_df['Region'], checkpoint_df['Municipality']))
+        done_munis = set(checkpoint_df['GADM ID'])
         municipality_results = checkpoint_df.to_dict('records')
         print(f'Resuming - {len(municipality_results)} municipalities already done.')
     else:
@@ -396,7 +498,7 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
 
         remaining = [
             row for _, row in prov_munis.iterrows()
-            if (region_name, row[muni_col]) not in done_munis
+            if row[gid_col] not in done_munis
         ]
         if not remaining:
             print(f'[{p_idx+1}/{len(province_list)}] {region_name} - already complete, skipping.')
@@ -414,6 +516,23 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
             temp_pbf = f'/tmp/muni_{safe_name}.osm.pbf'
 
             print(f'  [{m_idx+1}/{len(remaining)}] {muni_name} ...', end=' ', flush=True)
+
+            # Cheap in-memory joins - independent of the OSM road extraction
+            # below, so they run (and are included) even if that fails.
+            if pollution_country_code:
+                muni_stations = match_stations_to_municipality(station_gdf, muni_row['geometry'])
+                zone_ids = match_municipality_to_zones(zones_gdf, muni_row['geometry'])
+                own_station_stats = estimate_own_pollution_stats(
+                    muni_stations, zone_ids, zone_stations_gdf, daily_means_by_pollutant,
+                    station_gdf_utm, muni_row['centroid_utm'],
+                )
+                zone_stats = compute_zone_pollution_stats(
+                    zone_ids, zone_stations_gdf, daily_means_by_pollutant, daily_max_by_pollutant
+                )
+                pollution_stats = {**own_station_stats, **zone_stats}
+            else:
+                pollution_stats = {c: float('nan') for c in POLLUTION_COLUMNS}
+
             osm = roads = cycling = None
             try:
                 ok = osmium_extract(str(source_pbf), bbox, temp_pbf)
@@ -456,12 +575,14 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 result_row = {
                     'Region': region_name,
                     'Municipality': muni_name,
+                    'GADM ID': muni_row[gid_col],
                     'Municipality area (km²)': muni_row['area_km2'],
                 }
                 result_row.update(by_cat.to_dict())
                 result_row.update(amenity_stats)
+                result_row.update(pollution_stats)
                 municipality_results.append(result_row)
-                done_munis.add((region_name, muni_name))
+                done_munis.add(muni_row[gid_col])
                 print(f'{total_km:.1f} km  ({len(cycling):,} segments)')
 
             except Exception as exc:
@@ -469,12 +590,14 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
                 result_row = {
                     'Region': region_name,
                     'Municipality': muni_name,
+                    'GADM ID': muni_row[gid_col],
                     'Municipality area (km²)': muni_row['area_km2'],
                 }
                 result_row.update({c: 0.0 for c in CATEGORIES})
                 result_row.update({c: 0 for c in AMENITY_METRIC_COLUMNS})
+                result_row.update(pollution_stats)
                 municipality_results.append(result_row)
-                done_munis.add((region_name, muni_name))
+                done_munis.add(muni_row[gid_col])
 
             finally:
                 del osm, roads, cycling
@@ -498,9 +621,10 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     summary = pd.DataFrame(municipality_results)
     cat_cols = [c for c in CATEGORIES if c in summary.columns]
     amenity_cols = [c for c in AMENITY_METRIC_COLUMNS if c in summary.columns]
-    summary = summary[['Region', 'Municipality', 'Municipality area (km²)'] + cat_cols + amenity_cols]
+    pollution_cols = [c for c in POLLUTION_COLUMNS if c in summary.columns]
+    summary = summary[['Region', 'Municipality', 'GADM ID', 'Municipality area (km²)'] + cat_cols + amenity_cols + pollution_cols]
 
-    summary.insert(3, 'Total Cycling Path km', summary[cat_cols].sum(axis=1).round(1))
+    summary.insert(4, 'Total Cycling Path km', summary[cat_cols].sum(axis=1).round(1))
     summary = summary.sort_values(['Region', 'Total Cycling Path km'], ascending=[True, False]).reset_index(drop=True)
 
     out_path = f'{run_name}_cycling_by_municipality.csv'
@@ -512,5 +636,29 @@ def run_country_analysis(country, filter_regions=None, data_dir=Path('data'),
     png_path = output_dir / f'{run_name}_cycling_by_municipality.png'
     save_table_png(summary, png_path, title=f'{run_name.replace("_", " ").title()} - cycling infrastructure by municipality')
     print(f'Saved -> {png_path}')
+
+    # Separate pollution-only table (columns 1-10, pollution_columns_plan.md)
+    # alongside the cycling table above - only meaningful for countries with
+    # pollution data wired up (see POLLUTION_COUNTRIES); a Netherlands/etc.
+    # run would otherwise render a table of nothing but blanks.
+    if pollution_country_code:
+        pollution_png_path = output_dir / f'{run_name}_pollution_by_municipality.png'
+        pollution_table = summary[['Region', 'Municipality'] + pollution_cols]
+        save_table_png(
+            pollution_table, pollution_png_path,
+            title=f'{run_name.replace("_", " ").title()} - air quality by municipality',
+        )
+        print(f'Saved -> {pollution_png_path}')
+
+    # Database/webapp-ready CSV alongside the human-facing PNG/CSV above -
+    # snake_case columns + a stable gadm_id + run metadata, see
+    # save_database_csv()'s docstring for why this is a separate file rather
+    # than just this same summary.
+    db_csv_path = output_dir / f'{run_name}_municipalities.csv'
+    save_database_csv(
+        summary, db_csv_path, country=country, run_name=run_name,
+        pollution_year=pollution_year if pollution_country_code else None,
+    )
+    print(f'Saved -> {db_csv_path}')
 
     return summary

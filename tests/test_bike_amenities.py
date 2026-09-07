@@ -18,7 +18,9 @@ def test_none_input_returns_all_zero():
         'Total parking capacity': 0,
         'Covered parking spots': 0,
         'Covered parking capacity': 0,
-        'Bike shops / rental / repair stations': 0,
+        'Bike shops': 0,
+        'Bike rental stations': 0,
+        'Bike repair stations': 0,
     }
 
 
@@ -43,7 +45,9 @@ def test_mixed_rows():
     assert stats['Total parking capacity'] == 14  # 10 + 0 (missing) + 4
     assert stats['Covered parking spots'] == 2  # covered=yes row + bicycle_parking=shed row
     assert stats['Covered parking capacity'] == 14  # 10 (covered=yes) + 4 (shed)
-    assert stats['Bike shops / rental / repair stations'] == 3  # shop + rental + repair
+    assert stats['Bike shops'] == 1
+    assert stats['Bike rental stations'] == 1
+    assert stats['Bike repair stations'] == 1
 
 
 def test_garbage_capacity_value_coerced_to_zero_not_crash():
@@ -63,4 +67,6 @@ def test_missing_optional_columns_dont_crash():
     assert stats['Total parking spots'] == 1
     assert stats['Total parking capacity'] == 0
     assert stats['Covered parking spots'] == 0
-    assert stats['Bike shops / rental / repair stations'] == 0
+    assert stats['Bike shops'] == 0
+    assert stats['Bike rental stations'] == 0
+    assert stats['Bike repair stations'] == 0
